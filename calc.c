@@ -13,6 +13,7 @@ typedef struct {
     size_t index;
     int token;
     long long number;
+    int error;
 } Parser;
 
 static void next_token(Parser *p)
@@ -47,6 +48,43 @@ static void next_token(Parser *p)
     }
 }
 
+static long long primary(Parser *p)
+{
+    if (p->token != NUMBER) {
+        p->error = 1;
+        return 0;
+    }
+
+    long long value = p->number;
+    next_token(p);
+
+    return value;
+}
+
+static long long expression(Parser *p)
+{
+    long long result = primary(p);
+
+    while (!p->error && (p->token == '+' || p->token == '-')) {
+        int op = p->token;
+        next_token(p);
+
+        long long right = primary(p);
+
+        if (p->error) {
+            return 0;
+        }
+
+        if (op == '+') {
+            result += right;
+        } else {
+            result -= right;
+        }
+    }
+
+    return result;
+}
+
 int main(void)
 {
     printf("Calculator started.\n");
@@ -70,21 +108,13 @@ int main(void)
 
         next_token(&p);
 
-        while (p.token != END) {
-            if (p.token == NUMBER) {
-                printf("  NUMBER: %lld\n", p.number);
-            } else if (p.token == INVALID) {
-                printf("  INVALID TOKEN\n");
-                fclose(file);
-                return 1;
-            } else {
-                printf("  SYMBOL: %c\n", p.token);
-            }
+        long long result = expression(&p);
 
-            next_token(&p);
+        if (p.error || p.token != END) {
+            printf("  ERROR\n");
+        } else {
+            printf("  RESULT: %lld\n", result);
         }
-
-        printf("  END\n");
     }
 
     if (ferror(file)) {
