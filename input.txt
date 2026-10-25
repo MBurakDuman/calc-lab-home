@@ -1,3 +1,4 @@
+# Integer calculator tests
 12 + 3
 20 - 8 + 2
 5 - 9
@@ -7,10 +8,12 @@
 (2 + 3) * 4
 (10 - 2) / 2
 
+# Division tests
 20 / 2 / 2
 7 / 2
 (0 - 7) / 2
 
+# Power tests
 2 ** 3
 2 ** 3 ** 2
 (2 ** 3) ** 2
