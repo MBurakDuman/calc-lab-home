@@ -1,12 +1,17 @@
 // Mehmet Burak Duman 241ADB160
 // https://github.com/MBurakDuman/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: ChatGpt for corrections and explanations
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+
+#define FIRST_NAME "mehmet_burak"
+#define LAST_NAME "duman"
+#define STUDENT_ID "241adb160"
 
 enum { END = 256, NUMBER, POWER, INVALID };
 
@@ -18,9 +23,8 @@ typedef struct {
     int error;
 } Parser;
 
-/* Developed with ChatGPT assistance.
- * index points to the next unread character. Each call consumes one
- * token and leaves it available for the parser to inspect.
+/* index points to the next unread character.
+ * Each call leaves one token available for the parser to inspect.
  */
 static void next_token(Parser *p)
 {
@@ -46,7 +50,7 @@ static void next_token(Parser *p)
 
     p->index++;
 
-    /* Recognize two adjacent stars as one token before accepting '*'. */
+    /* Two adjacent stars form one operator. */
     if (c == '*' && p->text[p->index] == '*') {
         p->index++;
         p->token = POWER;
@@ -60,15 +64,14 @@ static void next_token(Parser *p)
 
 static long long expression(Parser *p);
 
-/* A parenthesized expression is evaluated as a single operand.
- * Only numbers and '(' may begin an operand, so unary signs are rejected.
+/* Parentheses make a complete expression act as one operand.
+ * Rejecting other starting tokens also rejects unary signs.
  */
 static long long primary(Parser *p)
 {
     if (p->token == NUMBER) {
         long long value = p->number;
         next_token(p);
-
         return value;
     }
 
@@ -94,9 +97,8 @@ static long long primary(Parser *p)
     return 0;
 }
 
-/* Developed with ChatGPT assistance using the assignment's grammar.
- * Calling power() for the exponent groups 2**3**2 as 2**(3**2).
- * This recursive version will be replaced for very long power chains.
+/* Recursion on the right groups 2**3**2 as 2**(3**2).
+ * Very long power chains will need an iterative implementation.
  */
 static long long power(Parser *p)
 {
@@ -121,10 +123,9 @@ static long long power(Parser *p)
 
     long long result = 1;
 
-    /* Integer multiplication preserves exact integer results.
-     * Squaring reduces the number of steps for large exponents.
-     * Avoid the final unused square, which could otherwise overflow.
-     * The assignment guarantees that integer arithmetic fits long long.
+    /* Squaring needs only logarithmically many steps.
+     * Skip the unused final square to avoid unnecessary overflow.
+     * The assignment guarantees that integer arithmetic fits.
      */
     while (exponent > 0) {
         if (exponent % 2 != 0) {
@@ -141,8 +142,8 @@ static long long power(Parser *p)
     return result;
 }
 
-/* Reading powers first gives ** higher priority than * and /.
- * The loop evaluates multiplication and division left to right.
+/* Parsing powers first gives ** higher precedence.
+ * The loop applies multiplication and division left to right.
  */
 static long long term(Parser *p)
 {
@@ -161,9 +162,6 @@ static long long term(Parser *p)
         if (op == '*') {
             result *= right;
         } else {
-            /* Check before dividing to avoid undefined behaviour.
-             * Integer division in C truncates toward zero as required.
-             */
             if (right == 0) {
                 p->error = 1;
                 return 0;
@@ -176,8 +174,8 @@ static long long term(Parser *p)
     return result;
 }
 
-/* Reading a complete term for each operand gives * and / priority.
- * Updating result in a loop makes + and - left-associative.
+/* Each operand is a complete term, so * and / finish before + and -.
+ * The loop makes subtraction left-associative.
  */
 static long long expression(Parser *p)
 {
@@ -203,61 +201,206 @@ static long long expression(Parser *p)
     return result;
 }
 
-int main(void)
+static int make_output_directory(const char *path)
 {
-    printf("Calculator started.\n");
+    struct stat st;
 
-    FILE *file = fopen("input.txt", "r");
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+            return 0;
+        }
 
-    if (file == NULL) {
-        perror("Cannot open input.txt");
+        fprintf(stderr, "Output path is not a directory: %s\n", path);
         return 1;
     }
 
-    /* Temporary development buffer.
-     * Dynamic line reading will replace this before submission.
-     */
+    /* Only create a missing directory; other stat errors must be reported. */
+    if (errno != ENOENT) {
+        perror(path);
+        return 1;
+    }
+
+    if (mkdir(path, 0777) != 0) {
+        perror(path);
+        return 1;
+    }
+
+    return 0;
+}
+
+static char *make_output_path(const char *input, const char *outdir)
+{
+    /* Strip parent directories so labs/task1.txt becomes task1. */
+    const char *base = strrchr(input, '/');
+
+    if (base != NULL) {
+        base++;
+    } else {
+        base = input;
+    }
+
+    size_t base_length = strlen(base);
+
+    if (base_length >= 4 &&
+        strcmp(base + base_length - 4, ".txt") == 0) {
+        base_length -= 4;
+    }
+
+    const char suffix[] =
+        "_" FIRST_NAME "_" LAST_NAME "_" STUDENT_ID ".txt";
+
+    size_t directory_length = strlen(outdir);
+    size_t size = directory_length + 1 + base_length + sizeof(suffix);
+
+    char *path = malloc(size);
+
+    if (path == NULL) {
+        fprintf(stderr, "Out of memory\n");
+        return NULL;
+    }
+
+    memcpy(path, outdir, directory_length);
+    path[directory_length] = '/';
+
+    memcpy(path + directory_length + 1, base, base_length);
+
+    /* sizeof(suffix) includes the terminating null character. */
+    memcpy(path + directory_length + 1 + base_length,
+           suffix, sizeof(suffix));
+
+    return path;
+}
+
+static int process_file(const char *input, const char *outdir)
+{
+    struct stat st;
+
+    if (stat(input, &st) != 0) {
+        perror(input);
+        return 1;
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "Input is not a regular file: %s\n", input);
+        return 1;
+    }
+
+    FILE *in = fopen(input, "r");
+
+    if (in == NULL) {
+        perror(input);
+        return 1;
+    }
+
+    if (make_output_directory(outdir) != 0) {
+        fclose(in);
+        return 1;
+    }
+
+    char *output = make_output_path(input, outdir);
+
+    if (output == NULL) {
+        fclose(in);
+        return 1;
+    }
+
+    FILE *out = fopen(output, "w");
+
+    if (out == NULL) {
+        perror(output);
+        free(output);
+        fclose(in);
+        return 1;
+    }
+
+    int status = 0;
+
+    /* Temporary buffer; dynamic line reading is the next stage. */
     char line[1024];
-    int line_number = 0;
 
-    while (fgets(line, sizeof(line), file) != NULL) {
-        line_number++;
-        printf("Line %d: %s", line_number, line);
-
-        /* Keep diagnostics on a separate line even when the final
-         * input line has no newline character.
-         */
-        if (strchr(line, '\n') == NULL) {
-            printf("\n");
-        }
-
+    while (fgets(line, sizeof(line), in) != NULL) {
         Parser p = {0};
         p.text = line;
 
         next_token(&p);
 
-        long long result = expression(&p);
+        /* Whitespace-only lines contain no expression. */
+        if (p.token == END) {
+            continue;
+        }
 
-        /* Remaining tokens mean the whole expression was not accepted,
-         * for example an extra ')' or two adjacent numbers.
+        long long result = expression(&p);
+        int written;
+
+        /* Temporary error format. Exact file positions and discarding
+         * partial results will be implemented in the next stage.
          */
         if (p.error || p.token != END) {
-            printf("  ERROR\n");
+            written = fprintf(out, "ERROR\n");
         } else {
-            printf("  RESULT: %lld\n", result);
+            written = fprintf(out, "%lld\n", result);
+        }
+
+        if (written < 0) {
+            fprintf(stderr, "Cannot write output: %s\n", output);
+            status = 1;
+            break;
         }
     }
 
-    if (ferror(file)) {
-        perror("Cannot read input.txt");
-        fclose(file);
-        return 1;
+    if (ferror(in)) {
+        fprintf(stderr, "Cannot read input: %s\n", input);
+        status = 1;
     }
 
-    if (fclose(file) != 0) {
-        perror("Cannot close input.txt");
-        return 1;
+    if (fclose(in) != 0) {
+        perror(input);
+        status = 1;
     }
 
-    return 0;
+    /* Buffered writes can fail when the file is closed. */
+    if (fclose(out) != 0) {
+        perror(output);
+        status = 1;
+    }
+
+    free(output);
+    return status;
+}
+
+int main(int argc, char *argv[])
+{
+    const char *input = NULL;
+    const char *outdir = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0) {
+            if (outdir != NULL ||
+                i + 1 >= argc ||
+                argv[i + 1][0] == '-') {
+                goto usage;
+            }
+
+            outdir = argv[++i];
+        } else {
+            if (argv[i][0] == '-' || input != NULL) {
+                goto usage;
+            }
+
+            input = argv[i];
+        }
+    }
+
+    /* This stage requires -o. Default folders and directory input
+     * will be added when the full command line is implemented.
+     */
+    if (input == NULL || outdir == NULL) {
+        goto usage;
+    }
+
+    return process_file(input, outdir);
+
+usage:
+    fprintf(stderr, "Usage: %s -o OUTDIR input.txt\n", argv[0]);
+    return 1;
 }
