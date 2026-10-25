@@ -1,15 +1,14 @@
 // Mehmet Burak Duman 241ADB160
 // https://github.com/MBurakDuman/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: OpenAI ChatGPT (code generation, explanations and
-// debugging assistance); course assignment specification.
+// Resources used: ChatGpt for corrections and explanations
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 
-enum { END = 256, NUMBER, INVALID };
+enum { END = 256, NUMBER, POWER, INVALID };
 
 typedef struct {
     const char *text;
@@ -47,8 +46,12 @@ static void next_token(Parser *p)
 
     p->index++;
 
-    if (c == '+' || c == '-' || c == '*' ||
-        c == '/' || c == '(' || c == ')') {
+    /* Recognize two adjacent stars as one token before accepting '*'. */
+    if (c == '*' && p->text[p->index] == '*') {
+        p->index++;
+        p->token = POWER;
+    } else if (c == '+' || c == '-' || c == '*' ||
+               c == '/' || c == '(' || c == ')') {
         p->token = c;
     } else {
         p->token = INVALID;
@@ -92,18 +95,64 @@ static long long primary(Parser *p)
 }
 
 /* Developed with ChatGPT assistance using the assignment's grammar.
- * Multiplication and division are completed before expression() adds
- * or subtracts their results. The loop evaluates them left to right.
+ * Calling power() for the exponent groups 2**3**2 as 2**(3**2).
+ * This recursive version will be replaced for very long power chains.
+ */
+static long long power(Parser *p)
+{
+    long long base = primary(p);
+
+    if (p->error || p->token != POWER) {
+        return base;
+    }
+
+    next_token(p);
+
+    long long exponent = power(p);
+
+    if (p->error) {
+        return 0;
+    }
+
+    if (exponent < 0) {
+        p->error = 1;
+        return 0;
+    }
+
+    long long result = 1;
+
+    /* Integer multiplication preserves exact integer results.
+     * Squaring reduces the number of steps for large exponents.
+     * Avoid the final unused square, which could otherwise overflow.
+     * The assignment guarantees that integer arithmetic fits long long.
+     */
+    while (exponent > 0) {
+        if (exponent % 2 != 0) {
+            result *= base;
+        }
+
+        exponent /= 2;
+
+        if (exponent > 0) {
+            base *= base;
+        }
+    }
+
+    return result;
+}
+
+/* Reading powers first gives ** higher priority than * and /.
+ * The loop evaluates multiplication and division left to right.
  */
 static long long term(Parser *p)
 {
-    long long result = primary(p);
+    long long result = power(p);
 
     while (!p->error && (p->token == '*' || p->token == '/')) {
         int op = p->token;
         next_token(p);
 
-        long long right = primary(p);
+        long long right = power(p);
 
         if (p->error) {
             return 0;
