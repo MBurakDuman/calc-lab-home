@@ -1,12 +1,15 @@
 // Mehmet Burak Duman 241ADB160
 // https://github.com/MBurakDuman/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
+// Resources used: GPT: small code generation, comments and some debugs;
+// Gemini (Google): code review, explanations.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/stat.h>
 
 #define FIRST_NAME "mehmet_burak"
@@ -16,6 +19,8 @@
 enum { END = 256, NUMBER, POWER, INVALID };
 
 typedef struct {
+    int floating;
+    double real;
     long long integer;
     size_t start;
 } Value;
@@ -55,7 +60,7 @@ static size_t grow(size_t capacity, size_t item_size)
 
 static Value zero_value(void)
 {
-    Value v = {0, 0};
+    Value v = {0};
     return v;
 }
 
@@ -97,14 +102,32 @@ static void next_token(Parser *p)
             p->index++;
         }
 
+        int is_float = 0;
+        if (p->index + 1 < p->length && p->text[p->index] == '.' &&
+            isdigit((unsigned char)p->text[p->index + 1])) {
+            is_float = 1;
+            p->index++;
+            while (p->index < p->length &&
+                   isdigit((unsigned char)p->text[p->index])) {
+                p->index++;
+            }
+        }
+
         /* Temporarily terminate the token instead of copying it. */
         char saved = p->text[p->index];
         p->text[p->index] = '\0';
 
-        errno = 0;
-        p->number.integer = strtoll(p->text + begin, NULL, 10);
+        p->number = zero_value();
+        p->number.floating = is_float;
+        if (is_float) {
+            p->number.real = strtod(p->text + begin, NULL);
+            p->token = isfinite(p->number.real) ? NUMBER : INVALID;
+        } else {
+            errno = 0;
+            p->number.integer = strtoll(p->text + begin, NULL, 10);
+            p->token = errno == ERANGE ? INVALID : NUMBER;
+        }
         p->number.start = p->token_pos;
-        p->token = errno == ERANGE ? INVALID : NUMBER;
 
         p->text[p->index] = saved;
         return;
@@ -129,13 +152,32 @@ static void next_token(Parser *p)
  * Division by zero and negative exponents are reported at the start
  * of the right operand, including '(' when that operand is grouped.
  */
-static Value calculate(Parser *p, Value a, int op, Value b)
+static Value calculate(Parser *p, Value a, int op, Value b,
+                       size_t operator_pos)
 {
     Value result = zero_value();
     result.start = a.start;
 
-    if (op == '/' && b.integer == 0) {
+    int is_b_zero = b.floating ? b.real == 0.0 : b.integer == 0;
+    if (op == '/' && is_b_zero) {
         fail(p, b.start);
+        return result;
+    }
+
+    if (a.floating || b.floating) {
+        result.floating = 1;
+        double da = a.floating ? a.real : (double)a.integer;
+        double db = b.floating ? b.real : (double)b.integer;
+        switch (op) {
+            case '+': result.real = da + db; break;
+            case '-': result.real = da - db; break;
+            case '*': result.real = da * db; break;
+            case '/': result.real = da / db; break;
+            case POWER: result.real = pow(da, db); break;
+        }
+        if (!isfinite(result.real)) {
+            fail(p, operator_pos);
+        }
         return result;
     }
 
@@ -221,6 +263,11 @@ static Value primary(Parser *p)
  * This gives right associativity without one recursive call per '**'.
  * Recursion is still used for nested parentheses.
  */
+typedef struct {
+    Value val;
+    size_t op_pos;
+} PowerPart;
+
 static Value power(Parser *p)
 {
     Value v = primary(p);
@@ -231,7 +278,7 @@ static Value power(Parser *p)
 
     size_t count = 0;
     size_t capacity = 8;
-    Value *parts = allocate(NULL, capacity * sizeof(*parts));
+    PowerPart *parts = allocate(NULL, capacity * sizeof(*parts));
 
     while (!p->error && p->token == POWER) {
         if (count == capacity) {
@@ -239,14 +286,16 @@ static Value power(Parser *p)
             parts = allocate(parts, capacity * sizeof(*parts));
         }
 
-        parts[count++] = v;
+        parts[count].val = v;
+        parts[count].op_pos = p->token_pos;
+        count++;
         next_token(p);
         v = primary(p);
     }
 
     while (!p->error && count > 0) {
         count--;
-        v = calculate(p, parts[count], POWER, v);
+        v = calculate(p, parts[count].val, POWER, v, parts[count].op_pos);
     }
 
     free(parts);
@@ -262,12 +311,13 @@ static Value term(Parser *p)
 
     while (!p->error && (p->token == '*' || p->token == '/')) {
         int op = p->token;
+        size_t operator_pos = p->token_pos;
         next_token(p);
 
         Value right = power(p);
 
         if (!p->error) {
-            v = calculate(p, v, op, right);
+            v = calculate(p, v, op, right, operator_pos);
         }
     }
 
@@ -282,12 +332,13 @@ static Value expression(Parser *p)
 
     while (!p->error && (p->token == '+' || p->token == '-')) {
         int op = p->token;
+        size_t operator_pos = p->token_pos;
         next_token(p);
 
         Value right = term(p);
 
         if (!p->error) {
-            v = calculate(p, v, op, right);
+            v = calculate(p, v, op, right, operator_pos);
         }
     }
 
@@ -461,7 +512,10 @@ static int process_file(const char *input, const char *outdir)
                 break;
             }
 
-            if (fprintf(results, "%lld\n", v.integer) < 0) {
+            int written = v.floating
+                ? fprintf(results, "%.15g\n", v.real)
+                : fprintf(results, "%lld\n", v.integer);
+            if (written < 0) {
                 perror("Temporary output");
                 status = 1;
                 break;
