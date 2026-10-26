@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #define FIRST_NAME "mehmet_burak"
 #define LAST_NAME "duman"
@@ -593,36 +594,144 @@ static int process_file(const char *input, const char *outdir)
     return status;
 }
 
+static char *default_output_directory(const char *input, int directory_mode)
+{
+    size_t end = strlen(input);
+    while (end > 1 && input[end - 1] == '/') {
+        end--;
+    }
+    size_t begin = end;
+    while (begin > 0 && input[begin - 1] != '/') {
+        begin--;
+    }
+    size_t length = end - begin;
+    if (!directory_mode && length >= 4 &&
+        memcmp(input + end - 4, ".txt", 4) == 0) {
+        length -= 4;
+    }
+    const char suffix[] = "_" FIRST_NAME "_" STUDENT_ID;
+    char *path = allocate(NULL, length + sizeof(suffix));
+    memcpy(path, input + begin, length);
+    memcpy(path + length, suffix, sizeof(suffix));
+    return path;
+}
+
+static int process_directory(const char *input, const char *outdir)
+{
+    DIR *directory = opendir(input);
+    if (directory == NULL) {
+        perror(input);
+        return 1;
+    }
+    if (make_output_directory(outdir) != 0) {
+        closedir(directory);
+        return 1;
+    }
+
+    int status = 0;
+    size_t input_length = strlen(input);
+    char **files = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                perror(input);
+                status = 1;
+            }
+            break;
+        }
+        size_t length = strlen(entry->d_name);
+        if (length < 4 || strcmp(entry->d_name + length - 4, ".txt") != 0) {
+            continue;
+        }
+        char *path = allocate(NULL, input_length + length + 2);
+        memcpy(path, input, input_length);
+        path[input_length] = '/';
+        memcpy(path + input_length + 1, entry->d_name, length + 1);
+
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            perror(path);
+            status = 1;
+        } else if (S_ISREG(st.st_mode)) {
+            if (count == capacity) {
+                capacity = capacity == 0 ? 16 : capacity * 2;
+                files = allocate(files, capacity * sizeof(*files));
+            }
+            files[count++] = path;
+            path = NULL;
+        }
+        free(path);
+        if (status) {
+            break;
+        }
+    }
+    if (closedir(directory) != 0) {
+        perror(input);
+        status = 1;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!status && process_file(files[i], outdir) != 0) {
+            status = 1;
+        }
+        free(files[i]);
+    }
+    free(files);
+    return status;
+}
+
 int main(int argc, char *argv[])
 {
     const char *input = NULL;
+    const char *directory = NULL;
     const char *outdir = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0) {
-            if (outdir != NULL ||
-                i + 1 >= argc ||
-                argv[i + 1][0] == '-') {
+        if (strcmp(argv[i], "-o") == 0 ||
+            strcmp(argv[i], "--output-dir") == 0) {
+            if (outdir != NULL || i + 1 >= argc ||
+                argv[i + 1][0] == '-' || argv[i + 1][0] == '\0') {
                 goto usage;
             }
-
             outdir = argv[++i];
-        } else {
-            if (argv[i][0] == '-' || input != NULL) {
+        } else if (strcmp(argv[i], "-d") == 0 ||
+                   strcmp(argv[i], "--dir") == 0) {
+            if (directory != NULL || input != NULL || i + 1 >= argc ||
+                argv[i + 1][0] == '-' || argv[i + 1][0] == '\0') {
                 goto usage;
             }
-
+            directory = argv[++i];
+        } else {
+            if (argv[i][0] == '-' || argv[i][0] == '\0' ||
+                input != NULL || directory != NULL) {
+                goto usage;
+            }
             input = argv[i];
         }
     }
 
-    if (input == NULL || outdir == NULL) {
+    if (input == NULL && directory == NULL) {
         goto usage;
     }
 
-    return process_file(input, outdir);
+    char *generated = NULL;
+    if (outdir == NULL) {
+        generated = default_output_directory(directory != NULL ? directory : input,
+                                             directory != NULL);
+        outdir = generated;
+    }
+    int status = directory != NULL
+        ? process_directory(directory, outdir)
+        : process_file(input, outdir);
+    free(generated);
+    return status;
 
 usage:
-    fprintf(stderr, "Usage: %s -o OUTDIR input.txt\n", argv[0]);
+    fprintf(stderr,
+            "Usage: %s [-d DIR | --dir DIR] [-o OUTDIR | --output-dir OUTDIR] [input.txt]\n",
+            argv[0]);
     return 1;
 }
